@@ -23,6 +23,8 @@ from absl import flags
 import flax
 from flax.metrics import tensorboard
 from flax.training import checkpoints
+from flax.training import train_state
+import optax
 import jax
 from jax import config
 from jax import random
@@ -39,7 +41,7 @@ utils.define_flags()
 config.parse_flags_with_absl()
 
 
-def train_step(model, rng, state, batch, lr):
+def train_step(model, rng, state, batch):
   """One optimization step.
 
   Args:
@@ -47,7 +49,6 @@ def train_step(model, rng, state, batch, lr):
     rng: jnp.ndarray, random number generator.
     state: utils.TrainState, state of the model/optimizer.
     batch: dict, a mini-batch of data for training.
-    lr: float, real-time learning rate.
 
   Returns:
     new_state: utils.TrainState, new training state.
@@ -102,9 +103,12 @@ def train_step(model, rng, state, batch, lr):
             sparsity_c), stats
 
   (_, stats), grad = (
-      jax.value_and_grad(loss_fn, has_aux=True)(state.optimizer.target))
+      jax.value_and_grad(loss_fn, has_aux=True)(state.params))
   grad = jax.lax.pmean(grad, axis_name="batch")
   stats = jax.lax.pmean(stats, axis_name="batch")
+
+  # TODO - replace with optax method of gradient clipping
+  # https://flax.readthedocs.io/en/latest/advanced_topics/optax_update_guide.html
 
   # Clip the gradient by value.
   if FLAGS.grad_max_val > 0:
@@ -119,8 +123,11 @@ def train_step(model, rng, state, batch, lr):
     mult = jnp.minimum(1, FLAGS.grad_max_norm / (1e-7 + grad_norm))
     grad = jax.tree_util.tree_map(lambda z: mult * z, grad)
 
-  new_optimizer = state.optimizer.apply_gradient(grad, learning_rate=lr)
-  new_state = state.replace(optimizer=new_optimizer)
+  updates, opt_state = state.tx.update(grad, state.opt_state)
+  params = optax.apply_updates(state.params, updates)
+
+  new_state = state.replace(params=params, opt_state=opt_state)
+
   return new_state, stats, rng
 
 
@@ -141,25 +148,29 @@ def main(unused_argv):
   dataset = datasets.get_dataset("train", FLAGS)
   test_dataset = datasets.get_dataset("test", FLAGS)
 
+  learning_rate_fn = functools.partial(
+    utils.learning_rate_decay,
+    lr_init=FLAGS.lr_init,
+    lr_final=FLAGS.lr_final,
+    max_steps=FLAGS.max_steps,
+    lr_delay_steps=FLAGS.lr_delay_steps,
+    lr_delay_mult=FLAGS.lr_delay_mult)
+
   rng, key = random.split(rng)
   model, variables = models.get_model(key, dataset.peek(), FLAGS)
-  optimizer = flax.optim.Adam(FLAGS.lr_init).create(variables)
-  state = utils.TrainState(optimizer=optimizer)
-  del optimizer, variables
-
-  learning_rate_fn = functools.partial(
-      utils.learning_rate_decay,
-      lr_init=FLAGS.lr_init,
-      lr_final=FLAGS.lr_final,
-      max_steps=FLAGS.max_steps,
-      lr_delay_steps=FLAGS.lr_delay_steps,
-      lr_delay_mult=FLAGS.lr_delay_mult)
+  tx = optax.adam(learning_rate=learning_rate_fn)
+  state = train_state.TrainState.create(
+      apply_fn=None,
+      params=variables,
+      tx=tx)
+  del tx, variables
 
   train_pstep = jax.pmap(
       functools.partial(train_step, model),
       axis_name="batch",
-      in_axes=(0, 0, 0, None),
-      donate_argnums=(2,))
+      in_axes=(0, 0, 0),
+      donate_argnums=(2,)
+      )
 
   def render_fn(variables, key_0, key_1, rays):
     return jax.lax.all_gather(
@@ -181,7 +192,7 @@ def main(unused_argv):
     utils.makedirs(FLAGS.train_dir)
   state = checkpoints.restore_checkpoint(FLAGS.train_dir, state)
   # Resume training a the step of the last checkpoint.
-  init_step = state.optimizer.state.step + 1
+  init_step = state.step + 1
   state = flax.jax_utils.replicate(state)
 
   if jax.host_id() == 0:
@@ -199,8 +210,7 @@ def main(unused_argv):
     if reset_timer:
       t_loop_start = time.time()
       reset_timer = False
-    lr = learning_rate_fn(step)
-    state, stats, keys = train_pstep(keys, state, batch, lr)
+    state, stats, keys = train_pstep(keys, state, batch)
     if jax.host_id() == 0:
       stats_trace.append(stats)
     if step % FLAGS.gc_every == 0:
