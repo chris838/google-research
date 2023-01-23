@@ -253,7 +253,8 @@ def main(unused_argv):
             FLAGS.train_dir, state_to_save, int(step), keep=100)
 
     # Test-set evaluation.
-    if FLAGS.render_every > 0 and step % FLAGS.render_every == 0:
+		# TODO - figure out to run evaluation in optax, without calling the old optim optimizer.target
+    if False and FLAGS.render_every > 0 and step % FLAGS.render_every == 0:
       # We reuse the same random number generator from the optimization step
       # here on purpose so that the visualization matches what happened in
       # training.
