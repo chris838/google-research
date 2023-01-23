@@ -19,7 +19,7 @@ import os
 from os import path
 from absl import flags
 import flax
-import flax.optim
+import optax
 import jax
 import jax.numpy as jnp
 import jax.scipy as jsp
@@ -31,10 +31,6 @@ from snerg.nerf import datasets
 BASE_DIR = "snerg"
 INTERNAL = False
 
-
-@flax.struct.dataclass
-class TrainState:
-  optimizer: flax.optim.Optimizer
 
 
 @flax.struct.dataclass
@@ -420,6 +416,72 @@ def save_img(img, pth):
   with open_file(pth, "wb") as imgout:
     Image.fromarray(np.array(
         (np.clip(img, 0., 1.) * 255.).astype(jnp.uint8))).save(imgout, "PNG")
+
+
+def get_learning_rate_schedule(lr_init,
+                                lr_final,
+                                max_steps,
+                                lr_delay_steps=0,
+                                lr_delay_mult=1):
+  """Continuous learning rate decay scheduler.
+
+  This function attempts to approximate `learning_rate_decay` using
+  optax schedules, mainting the same API and producing roughly similar
+  learning rate profile.
+
+  Args:
+    lr_init: float, the initial learning rate.
+    lr_final: float, the final learning rate.
+    max_steps: int, the number of steps during optimization.
+    lr_delay_steps: int, the number of steps to delay the full learning rate.
+    lr_delay_mult: float, the multiplier on the rate when delaying it.
+
+  Returns:
+    scheduler: optax scheduler ready to add to training state
+  """
+
+  inflection_absolute_value = lr_init * \
+      np.power(lr_final / lr_init, lr_delay_steps / max_steps)
+
+  # Some magic numbers here, just to try make the curve match the original
+  init_value = lr_init * lr_delay_mult
+  peak = int(lr_delay_steps * 0.55)
+  peak_multiple = 4.2
+  inflection = lr_delay_steps
+  inflection_multiple = inflection_absolute_value / (init_value * peak_multiple)
+  final = max_steps
+  final_multiple = lr_final
+
+  cos_schedule = optax.piecewise_interpolate_schedule(
+      interpolate_type="cosine",
+      init_value=init_value,
+      boundaries_and_scales={
+          peak: peak_multiple,
+          inflection: inflection_multiple,
+          final: final_multiple
+      }
+  )
+
+  poly_schedule = optax.polynomial_schedule(
+      init_value=(init_value * peak_multiple),
+      end_value=inflection_absolute_value,
+      power=0.6,
+      transition_steps=inflection - peak)
+
+  exp_schedule = optax.exponential_decay(
+      init_value=inflection_absolute_value,
+      transition_steps=max_steps,
+      decay_rate=lr_final/lr_init,
+      transition_begin=0,
+      staircase=False)
+
+  schedule = optax.join_schedules([
+      cos_schedule,
+      poly_schedule,
+      exp_schedule],
+      boundaries=[peak, lr_delay_steps])
+
+  return schedule
 
 
 def learning_rate_decay(step,

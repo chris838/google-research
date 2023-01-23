@@ -148,8 +148,7 @@ def main(unused_argv):
   dataset = datasets.get_dataset("train", FLAGS)
   test_dataset = datasets.get_dataset("test", FLAGS)
 
-  learning_rate_fn = functools.partial(
-    utils.learning_rate_decay,
+  schedule = utils.get_learning_rate_schedule(
     lr_init=FLAGS.lr_init,
     lr_final=FLAGS.lr_final,
     max_steps=FLAGS.max_steps,
@@ -158,7 +157,7 @@ def main(unused_argv):
 
   rng, key = random.split(rng)
   model, variables = models.get_model(key, dataset.peek(), FLAGS)
-  tx = optax.adam(learning_rate=learning_rate_fn)
+  tx = optax.adam(learning_rate=schedule)
   state = train_state.TrainState.create(
       apply_fn=None,
       params=variables,
@@ -235,7 +234,8 @@ def main(unused_argv):
         stats_trace = []
         summary_writer.scalar("train_avg_loss", avg_loss, step)
         summary_writer.scalar("train_avg_psnr", avg_psnr, step)
-        summary_writer.scalar("learning_rate", lr, step)
+				# TODO - find a way of logging learning rate
+        #summary_writer.scalar("learning_rate", lr, step)
         steps_per_sec = FLAGS.print_every / (time.time() - t_loop_start)
         reset_timer = True
         rays_per_sec = FLAGS.batch_size * steps_per_sec
@@ -245,7 +245,7 @@ def main(unused_argv):
         print(("{:" + "{:d}".format(precision) + "d}").format(step) +
               f"/{FLAGS.max_steps:d}: " + f"i_loss={stats.loss[0]:0.4f}, " +
               f"avg_loss={avg_loss:0.4f}, " +
-              f"weight_l2={stats.weight_l2[0]:0.2e}, " + f"lr={lr:0.2e}, " +
+              f"weight_l2={stats.weight_l2[0]:0.2e}, " + f"lr=[NOT_LOGGED] " +
               f"{rays_per_sec:0.0f} rays/sec")
       if step % FLAGS.save_every == 0:
         state_to_save = jax.device_get(jax.tree_map(lambda x: x[0], state))
