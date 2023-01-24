@@ -19,8 +19,10 @@ import functools
 import math
 
 import flax
+from flax.training import train_state
 import jax
 from jax import numpy as jnp
+import optax
 import numpy as np
 import tensorflow as tf
 import tensorflow_hub as tf_hub
@@ -252,16 +254,15 @@ def refine_view_dependence_mlp(rgbs,
     A dict with the refined parameters for the per-ray view-dependence MLP.
   """
 
-  def train_step(model, state, ref, rgb_features, directions, lr):
+  def train_step(model, state, ref, rgb_features, directions):
     """One optimization step for the view-dependence MLP.
 
     Args:
       model: The linen model for the view-dependence MLP.
-      state: utils.TrainState, state of the model/optimizer.
+      state: TrainState, state of the model/optimizer.
       ref: reference image.
       rgb_features: diffuse rgb image, with latent features for view-dependence.
       directions: direction vectors for each pixel.
-      lr: float, real-time learning rate.
 
     Returns:
       new_state: utils.TrainState, new training state.
@@ -275,33 +276,42 @@ def refine_view_dependence_mlp(rgbs,
       loss = ((final_rgb - ref[Ellipsis, :3])**2).mean()
       return loss
 
-    loss, grad = jax.value_and_grad(loss_fn)(state.optimizer.target)
+    loss, grad = jax.value_and_grad(loss_fn)(state.params)
     grad = jax.lax.pmean(grad, axis_name="batch")
     loss = jax.lax.psum(loss, axis_name="batch")
 
-    new_optimizer = state.optimizer.apply_gradient(grad, learning_rate=lr)
-    new_state = state.replace(optimizer=new_optimizer)
+    updates, opt_state = state.tx.update(grad, state.opt_state)
+    params = optax.apply_updates(state.params, updates)
+		
+		# TODO - I think if we set apply_fn properly, we shouldn't need to manually increment step
+    step = state.step + 1
+    new_state = state.replace(params=params, opt_state=opt_state, step=step)
+
     return new_state, loss
-
-  optimized_viewdir_params = viewdir_mlp_params
-  optimizer = flax.optim.Adam(learning_rate).create(optimized_viewdir_params)
-  state = utils.TrainState(optimizer=optimizer)
-  train_pstep = jax.pmap(
-      functools.partial(train_step, viewdir_mlp_model),
-      axis_name="batch",
-      in_axes=(0, 0, 0, 0, None),
-      donate_argnums=(1, 2, 3,))
-  state = flax.jax_utils.replicate(state)
-
-  # Our batch size automatically changes to match the number of ML accelerators.
+	
+	# Our batch size automatically changes to match the number of ML accelerators.
   # To keep the result somewhat consistent between hardware platforms, we
   # compensate for this by scaling the learning rate accordingly.
   num_local_devices_used_for_tuning = 8
   batch_aware_learning_rate = (
       learning_rate * jax.device_count()) / num_local_devices_used_for_tuning
+
+  optimized_viewdir_params = viewdir_mlp_params
+  tx = optax.adam(learning_rate=batch_aware_learning_rate)
+  state = train_state.TrainState.create(
+		apply_fn=None, # TODO - should this be model.apply?
+		params=optimized_viewdir_params,
+		tx=tx)
+
+  train_pstep = jax.pmap(
+      functools.partial(train_step, viewdir_mlp_model),
+      axis_name="batch",
+      in_axes=(0, 0, 0, 0),
+      donate_argnums=(1, 2, 3,))
+  state = flax.jax_utils.replicate(state)
+
   for _ in range(num_epochs):
     for i in range(rgbs.shape[0]):
-      state, _ = train_pstep(state, refs[i], rgbs[i], directions[i],
-                             batch_aware_learning_rate)
+      state, _ = train_pstep(state, refs[i], rgbs[i], directions[i])
 
-  return flax.jax_utils.unreplicate(state.optimizer.target)
+  return flax.jax_utils.unreplicate(state.params)

@@ -22,6 +22,8 @@ from absl import flags
 import flax
 from flax.metrics import tensorboard
 from flax.training import checkpoints
+from flax.training import train_state
+import optax
 import jax
 from jax import random
 import numpy as np
@@ -65,11 +67,22 @@ def main(unused_argv):
 
   train_dataset = datasets.get_dataset("train", FLAGS)
   test_dataset = datasets.get_dataset("test", FLAGS)
+
+  schedule = utils.get_learning_rate_schedule(
+    lr_init=FLAGS.lr_init,
+    lr_final=FLAGS.lr_final,
+    max_steps=FLAGS.max_steps,
+    lr_delay_steps=FLAGS.lr_delay_steps,
+    lr_delay_mult=FLAGS.lr_delay_mult)
+
   rng, key = random.split(rng)
   model, init_variables = models.get_model(key, test_dataset.peek(), FLAGS)
-  optimizer = flax.optim.Adam(FLAGS.lr_init).create(init_variables)
-  state = utils.TrainState(optimizer=optimizer)
-  del optimizer, init_variables
+  tx = optax.adam(learning_rate=schedule)
+  state = train_state.TrainState.create(
+      apply_fn=None, # TODO - should this be model.apply?
+      params=init_variables,
+      tx=tx)
+  del tx, init_variables
 
   # Initialize the parameters dictionaries for SNeRG.
   (render_params_init, culling_params_init, atlas_params_init,
@@ -96,7 +109,7 @@ def main(unused_argv):
 
   while True:
     state = checkpoints.restore_checkpoint(FLAGS.train_dir, state)
-    step = int(state.optimizer.state.step)
+    step = int(state.step)
     if step <= last_step:
       continue
 
@@ -108,7 +121,7 @@ def main(unused_argv):
     # Extract the MLPs we need for baking a SNeRG.
     (mlp_model, mlp_params, viewdir_mlp_model,
      viewdir_mlp_params) = model_utils.extract_snerg_mlps(
-         state.optimizer.target, scene_params_init)
+         state.params, scene_params_init)
 
     # Render out the low-res grid used for culling.
     culling_grid_coordinates = baking.build_3d_grid(

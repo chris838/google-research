@@ -47,7 +47,7 @@ def train_step(model, rng, state, batch):
   Args:
     model: The linen model.
     rng: jnp.ndarray, random number generator.
-    state: utils.TrainState, state of the model/optimizer.
+    state: TrainState, state of the model/optimizer.
     batch: dict, a mini-batch of data for training.
 
   Returns:
@@ -161,7 +161,7 @@ def main(unused_argv):
   model, variables = models.get_model(key, dataset.peek(), FLAGS)
   tx = optax.adam(learning_rate=schedule)
   state = train_state.TrainState.create(
-      apply_fn=model.apply,
+      apply_fn=None, # TODO - should this be model.apply?
       params=variables,
       tx=tx)
   del tx, variables

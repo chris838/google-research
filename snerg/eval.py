@@ -67,7 +67,7 @@ def main(unused_argv):
   model, init_variables = models.get_model(key, dataset.peek(), FLAGS)
   tx = optax.adam(learning_rate=schedule)
   state = train_state.TrainState.create(
-    apply_fn=None,
+    apply_fn=None, # TODO - should this be model.apply?
     params=init_variables,
     tx=tx)
   del tx, init_variables
