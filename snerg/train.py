@@ -125,8 +125,10 @@ def train_step(model, rng, state, batch):
 
   updates, opt_state = state.tx.update(grad, state.opt_state)
   params = optax.apply_updates(state.params, updates)
-
-  new_state = state.replace(params=params, opt_state=opt_state)
+  
+	# TODO - I think if we set apply_fn properly, we shouldn't need to manually increment step
+  step = state.step + 1
+  new_state = state.replace(params=params, opt_state=opt_state, step=step)
 
   return new_state, stats, rng
 
@@ -159,7 +161,7 @@ def main(unused_argv):
   model, variables = models.get_model(key, dataset.peek(), FLAGS)
   tx = optax.adam(learning_rate=schedule)
   state = train_state.TrainState.create(
-      apply_fn=None,
+      apply_fn=model.apply,
       params=variables,
       tx=tx)
   del tx, variables

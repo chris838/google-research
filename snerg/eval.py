@@ -22,6 +22,8 @@ from absl import flags
 import flax
 from flax.metrics import tensorboard
 from flax.training import checkpoints
+from flax.training import train_state
+import optax
 import jax
 from jax import random
 import numpy as np
@@ -52,14 +54,23 @@ def main(unused_argv):
     raise ValueError("train_dir must be set. None set now.")
   if FLAGS.data_dir is None:
     raise ValueError("data_dir must be set. None set now.")
-
   dataset = datasets.get_dataset("test", FLAGS)
+
+  schedule = utils.get_learning_rate_schedule(
+    lr_init=FLAGS.lr_init,
+    lr_final=FLAGS.lr_final,
+    max_steps=FLAGS.max_steps,
+    lr_delay_steps=FLAGS.lr_delay_steps,
+    lr_delay_mult=FLAGS.lr_delay_mult)
+
   rng, key = random.split(rng)
   model, init_variables = models.get_model(key, dataset.peek(), FLAGS)
-  optimizer = flax.optim.Adam(FLAGS.lr_init).create(init_variables)
-  state = utils.TrainState(optimizer=optimizer)
-  del optimizer, init_variables
-
+  tx = optax.adam(learning_rate=schedule)
+  state = train_state.TrainState.create(
+    apply_fn=None,
+    params=init_variables,
+    tx=tx)
+  del tx, init_variables
 
   # Rendering is forced to be deterministic even if training was randomized, as
   # this eliminates "speckle" artifacts.
@@ -87,7 +98,7 @@ def main(unused_argv):
         path.join(FLAGS.train_dir, "eval"))
   while True:
     state = checkpoints.restore_checkpoint(FLAGS.train_dir, state)
-    step = int(state.optimizer.state.step)
+    step = int(state.step)
     if step <= last_step:
       continue
     if FLAGS.save_output and (not utils.isdir(out_dir)):
@@ -101,7 +112,7 @@ def main(unused_argv):
       batch = next(dataset)
       (pred_color, pred_disp, pred_acc, pred_features,
        pred_specular) = utils.render_image(
-           functools.partial(render_pfn, state.optimizer.target),
+           functools.partial(render_pfn, state.params),
            batch["rays"],
            rng,
            FLAGS.dataset == "llff",
