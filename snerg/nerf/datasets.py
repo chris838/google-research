@@ -241,6 +241,47 @@ class Blender(Dataset):
     self.focal = .5 * self.w / np.tan(.5 * camera_angle_x)
     self.n_examples = self.images.shape[0]
 
+class Polycam(Dataset):
+  """Polycam Dataset."""
+
+  def _load_renderings(self, args):
+    """Load images from disk."""
+    if args.render_path:
+      raise ValueError("render_path cannot be used for the polycam dataset.")
+    with utils.open_file(
+        path.join(args.data_dir, "transforms_{}.json".format(self.split)),
+        "r") as fp:
+      meta = json.load(fp)
+    images = []
+    cams = []
+    for i in range(len(meta["frames"])):
+      frame = meta["frames"][i]
+      fname = os.path.join(args.data_dir, frame["file_path"])
+      with utils.open_file(fname, "rb") as imgin:
+        image = np.array(Image.open(imgin), dtype=np.float32) / 255.
+        if args.factor == 2:
+          [halfres_h, halfres_w] = [hw // 2 for hw in image.shape[:2]]
+          image = cv2.resize(
+              image, (halfres_w, halfres_h), interpolation=cv2.INTER_AREA)
+        elif args.factor > 0:
+          raise ValueError("Polycam dataset only supports factor=0 or 2, {} "
+                           "set.".format(args.factor))
+      cams.append(np.array(frame["transform_matrix"], dtype=np.float32))
+      images.append(image)
+    self.images = np.stack(images, axis=0)
+    if args.white_bkgd:
+      self.images = (
+          self.images[Ellipsis, :3] * self.images[Ellipsis, -1:] +
+          (1. - self.images[Ellipsis, -1:]))
+    else:
+      self.images = self.images[Ellipsis, :3]
+    self.h, self.w = self.images.shape[1:3]
+    self.resolution = self.h * self.w
+    self.camtoworlds = np.stack(cams, axis=0)
+    camera_angle_x = float(meta["camera_angle_x"])
+    self.focal = .5 * self.w / np.tan(.5 * camera_angle_x)
+    self.n_examples = self.images.shape[0]
+
 
 class LLFF(Dataset):
   """LLFF Dataset."""
@@ -481,4 +522,5 @@ class LLFF(Dataset):
 dataset_dict = {
     "blender": Blender,
     "llff": LLFF,
+		"polycam": Polycam,
 }
